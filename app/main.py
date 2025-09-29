@@ -563,7 +563,8 @@ class MainWindow(QMainWindow):
     def _append_chat_message(self, author: str, text: str) -> None:
         if not text:
             return
-        self.chat_view.append(f"<b>{author}:</b><br>{text.replace('\n', '<br>')}\n")
+        escaped = text.replace("\n", "<br>")
+        self.chat_view.append(f"<b>{author}:</b><br>{escaped}\n")
 
     # endregion ---------------------------------------------------------
 
