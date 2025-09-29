@@ -25,6 +25,58 @@ class GeminiConfig:
         return cls(api_key=os.environ.get("GEMINI_API_KEY"))
 
 
+@dataclass(frozen=True)
+class ModelSpec:
+    """Describes a supported model and its optional capabilities."""
+
+    model_id: str
+    label: str
+    description: str
+    supports_thinking: bool = True
+    supports_google_search: bool = True
+
+
+_MODEL_SPECS: List[ModelSpec] = [
+    ModelSpec(
+        model_id="gemini-2.5-pro",
+        label="Gemini 2.5 Pro",
+        description="Флагманская модель с расширенными инструментами и режимом размышлений.",
+        supports_thinking=True,
+        supports_google_search=True,
+    ),
+    ModelSpec(
+        model_id="gemma-3-27b-it",
+        label="Gemma 3 27B IT",
+        description="Легкая и быстрая модель без расширенного размышления и поиска.",
+        supports_thinking=False,
+        supports_google_search=False,
+    ),
+]
+
+_MODEL_SPEC_MAP: Dict[str, ModelSpec] = {spec.model_id: spec for spec in _MODEL_SPECS}
+
+
+def available_model_specs() -> List[ModelSpec]:
+    """Return the list of known model presets in display order."""
+
+    return list(_MODEL_SPECS)
+
+
+def _resolve_model_spec(model_id: str) -> ModelSpec:
+    """Return metadata for the requested model, falling back to a basic profile."""
+
+    spec = _MODEL_SPEC_MAP.get(model_id)
+    if spec:
+        return spec
+    return ModelSpec(
+        model_id=model_id,
+        label=model_id,
+        description="Пользовательская модель без дополнительных возможностей.",
+        supports_thinking=False,
+        supports_google_search=False,
+    )
+
+
 class GeminiClient:
     """Small wrapper around the google-genai client used by the app."""
 
@@ -35,23 +87,22 @@ class GeminiClient:
                 "GEMINI_API_KEY is not configured. Please set it before using AI features."
             )
         self._client = genai.Client(api_key=self.config.api_key)
+        self._spec = _resolve_model_spec(self.config.model)
 
     def _run_stream(self, contents: List[types.Content]) -> str:
-        tools = [types.Tool(googleSearch=types.GoogleSearch())]
+        config_kwargs: Dict[str, object] = {}
 
-        config_kwargs = {"tools": tools}
-        thinking_config = None
+        if self._spec.supports_google_search:
+            config_kwargs["tools"] = [types.Tool(googleSearch=types.GoogleSearch())]
 
-        # google-genai evolves quickly; prefer the unlimited thinking budget when supported.
-        for field in ("thinking_budget", "budget_tokens"):
-            try:
-                thinking_config = types.ThinkingConfig(**{field: -1})
-                break
-            except Exception:  # pragma: no cover - depends on installed SDK version
-                continue
-
-        if thinking_config is not None:
-            config_kwargs["thinking_config"] = thinking_config
+        if self._spec.supports_thinking:
+            # google-genai evolves quickly; prefer the unlimited thinking budget when supported.
+            for field in ("thinking_budget", "budget_tokens"):
+                try:
+                    config_kwargs["thinking_config"] = types.ThinkingConfig(**{field: -1})
+                    break
+                except Exception:  # pragma: no cover - depends on installed SDK version
+                    continue
 
         config = types.GenerateContentConfig(**config_kwargs)
 
@@ -156,4 +207,17 @@ class GeminiClient:
         return self._run_stream(contents)
 
 
-__all__ = ["GeminiClient", "GeminiConfig", "GeminiError"]
+    @property
+    def model_spec(self) -> ModelSpec:
+        """Expose the resolved model specification for UI consumers."""
+
+        return self._spec
+
+
+__all__ = [
+    "GeminiClient",
+    "GeminiConfig",
+    "GeminiError",
+    "ModelSpec",
+    "available_model_specs",
+]

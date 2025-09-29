@@ -7,13 +7,15 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from PySide6.QtCore import Qt, QThread, Signal
-from PySide6.QtGui import QAction, QCloseEvent, QIcon, QTextCursor
+from PySide6.QtGui import QCloseEvent, QIcon, QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
     QDialogButtonBox,
+    QComboBox,
     QFileDialog,
     QFormLayout,
+    QFrame,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -26,12 +28,11 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSplitter,
     QTextEdit,
-    QToolBar,
     QVBoxLayout,
     QWidget,
 )
 
-from ai import GeminiClient, GeminiConfig, GeminiError
+from ai import GeminiClient, GeminiConfig, GeminiError, available_model_specs
 from note_store import Note, NoteStore
 from settings_store import AppSettings, SettingsStore
 
@@ -98,9 +99,12 @@ class SettingsDialog(QDialog):
         self.api_key_edit.setPlaceholderText("Введите GEMINI_API_KEY")
         form.addRow("API ключ", self.api_key_edit)
 
-        self.model_edit = QLineEdit(settings.model)
-        self.model_edit.setPlaceholderText("gemini-2.5-pro")
-        form.addRow("Модель", self.model_edit)
+        self._model = settings.model
+        model_hint = QLabel(
+            "Текущая модель настраивается прямо в панели чата."
+        )
+        model_hint.setWordWrap(True)
+        form.addRow("Модель", model_hint)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
@@ -108,8 +112,7 @@ class SettingsDialog(QDialog):
         layout.addWidget(buttons)
 
     def values(self) -> AppSettings:
-        model = self.model_edit.text().strip() or "gemini-2.5-pro"
-        return AppSettings(api_key=self.api_key_edit.text().strip(), model=model)
+        return AppSettings(api_key=self.api_key_edit.text().strip(), model=self._model)
 
 
 class MainWindow(QMainWindow):
@@ -131,11 +134,13 @@ class MainWindow(QMainWindow):
         self.chat_thread: Optional[ChatWorker] = None
         self.pending_ai_range: Optional[tuple[int, int]] = None
         self.chat_history: List[Dict[str, str]] = []
+        self.model_combo: Optional[QComboBox] = None
 
         self.setWindowTitle(APP_NAME)
         self.resize(1200, 720)
         self._build_ui()
         self._load_notes()
+        self._populate_model_selector()
         self._apply_settings(update_status=False)
 
     # region UI setup -----------------------------------------------------
@@ -144,13 +149,19 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
 
         layout = QHBoxLayout(central)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+
         splitter = QSplitter(Qt.Horizontal)
+        splitter.setChildrenCollapsible(False)
         layout.addWidget(splitter)
 
         # Left panel: notes list + actions
-        left_panel = QWidget()
+        left_panel = QFrame()
+        left_panel.setObjectName("NotesPanel")
         left_layout = QVBoxLayout(left_panel)
-        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setContentsMargins(16, 16, 16, 16)
+        left_layout.setSpacing(12)
 
         header = QLabel("Заметки")
         header.setObjectName("NotesHeader")
@@ -167,86 +178,114 @@ class MainWindow(QMainWindow):
         note_buttons_layout.setSpacing(8)
 
         self.new_button = QPushButton("Новая")
+        self.new_button.setObjectName("NewNoteButton")
         self.new_button.clicked.connect(self._create_note)
         note_buttons_layout.addWidget(self.new_button)
 
         self.rename_button = QPushButton("Переименовать")
+        self.rename_button.setObjectName("RenameNoteButton")
         self.rename_button.clicked.connect(self._rename_note)
         note_buttons_layout.addWidget(self.rename_button)
 
         left_layout.addWidget(note_buttons)
 
-        # Right panel: editor + AI tools + chat
-        right_panel = QWidget()
-        right_layout = QVBoxLayout(right_panel)
-        right_layout.setContentsMargins(0, 0, 0, 0)
+        # Center panel: editor and actions
+        editor_card = QFrame()
+        editor_card.setObjectName("EditorCard")
+        editor_layout = QVBoxLayout(editor_card)
+        editor_layout.setContentsMargins(24, 24, 24, 24)
+        editor_layout.setSpacing(16)
 
-        toolbar = QToolBar()
-        toolbar.setIconSize(toolbar.iconSize() * 1.5)
-        right_layout.addWidget(toolbar)
+        editor_header = QWidget()
+        editor_header_layout = QHBoxLayout(editor_header)
+        editor_header_layout.setContentsMargins(0, 0, 0, 0)
+        editor_header_layout.setSpacing(12)
 
-        self.ai_button = QAction("AI: изменить выделение", self)
-        self.ai_button.triggered.connect(self._ask_ai_to_edit)
-        toolbar.addAction(self.ai_button)
+        editor_title = QLabel("Редактор заметки")
+        editor_title.setObjectName("EditorHeader")
+        editor_header_layout.addWidget(editor_title)
+        editor_header_layout.addStretch(1)
 
-        chat_clear_action = QAction("Очистить чат", self)
-        chat_clear_action.triggered.connect(self._clear_chat)
-        toolbar.addAction(chat_clear_action)
+        self.ai_button = QPushButton("Изменить выделение")
+        self.ai_button.setObjectName("AiButton")
+        self.ai_button.clicked.connect(self._ask_ai_to_edit)
+        editor_header_layout.addWidget(self.ai_button)
 
-        settings_action = QAction("Настройки ИИ", self)
-        settings_action.triggered.connect(self._open_settings)
-        toolbar.addAction(settings_action)
+        self.export_button = QPushButton("Экспорт…")
+        self.export_button.setObjectName("ExportButton")
+        self.export_button.clicked.connect(self._export_note)
+        editor_header_layout.addWidget(self.export_button)
 
-        export_action = QAction("Экспортировать…", self)
-        export_action.triggered.connect(self._export_note)
-        toolbar.addAction(export_action)
+        self.settings_button = QPushButton("Настройки")
+        self.settings_button.setObjectName("SettingsButton")
+        self.settings_button.clicked.connect(self._open_settings)
+        editor_header_layout.addWidget(self.settings_button)
 
-        vertical_splitter = QSplitter(Qt.Vertical)
-        right_layout.addWidget(vertical_splitter)
+        editor_layout.addWidget(editor_header)
 
         self.editor = QTextEdit()
         self.editor.setObjectName("Editor")
         self.editor.textChanged.connect(self._persist_active_note)
-        vertical_splitter.addWidget(self.editor)
+        editor_layout.addWidget(self.editor, 1)
 
-        chat_panel = QWidget()
-        chat_layout = QVBoxLayout(chat_panel)
-        chat_layout.setContentsMargins(0, 0, 0, 0)
-        chat_layout.setSpacing(8)
+        # Right panel: chat and model selector
+        chat_card = QFrame()
+        chat_card.setObjectName("ChatCard")
+        chat_layout = QVBoxLayout(chat_card)
+        chat_layout.setContentsMargins(24, 24, 24, 24)
+        chat_layout.setSpacing(16)
+
+        chat_header_row = QWidget()
+        chat_header_layout = QHBoxLayout(chat_header_row)
+        chat_header_layout.setContentsMargins(0, 0, 0, 0)
+        chat_header_layout.setSpacing(12)
 
         chat_header = QLabel("Чат с ИИ")
         chat_header.setObjectName("ChatHeader")
-        chat_layout.addWidget(chat_header)
+        chat_header_layout.addWidget(chat_header)
+        chat_header_layout.addStretch(1)
+
+        self.model_combo = QComboBox()
+        self.model_combo.setObjectName("ModelSelector")
+        self.model_combo.currentIndexChanged.connect(self._handle_model_change)
+        chat_header_layout.addWidget(self.model_combo)
+
+        chat_layout.addWidget(chat_header_row)
 
         self.chat_view = QTextEdit()
         self.chat_view.setObjectName("ChatView")
         self.chat_view.setReadOnly(True)
-        chat_layout.addWidget(self.chat_view)
+        chat_layout.addWidget(self.chat_view, 1)
+
+        clear_button = QPushButton("Очистить чат")
+        clear_button.setObjectName("ClearChatButton")
+        clear_button.clicked.connect(self._clear_chat)
+        chat_layout.addWidget(clear_button)
 
         input_row = QWidget()
         input_layout = QHBoxLayout(input_row)
         input_layout.setContentsMargins(0, 0, 0, 0)
-        input_layout.setSpacing(8)
+        input_layout.setSpacing(12)
 
         self.chat_input = QPlainTextEdit()
         self.chat_input.setObjectName("ChatInput")
         self.chat_input.setPlaceholderText("Спросите ИИ о заметке…")
-        self.chat_input.setFixedHeight(80)
+        self.chat_input.setFixedHeight(100)
         input_layout.addWidget(self.chat_input, 1)
 
         self.chat_send_button = QPushButton("Отправить")
+        self.chat_send_button.setObjectName("SendButton")
         self.chat_send_button.clicked.connect(self._send_chat_message)
         input_layout.addWidget(self.chat_send_button)
 
         chat_layout.addWidget(input_row)
-        vertical_splitter.addWidget(chat_panel)
-        vertical_splitter.setStretchFactor(0, 3)
-        vertical_splitter.setStretchFactor(1, 2)
 
         splitter.addWidget(left_panel)
-        splitter.addWidget(right_panel)
+        splitter.addWidget(editor_card)
+        splitter.addWidget(chat_card)
         splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 3)
+        splitter.setStretchFactor(1, 2)
+        splitter.setStretchFactor(2, 1)
 
         self._apply_theme()
 
@@ -260,6 +299,11 @@ class MainWindow(QMainWindow):
                 font-family: 'Segoe UI', 'Inter', sans-serif;
                 color: #f4f6fb;
                 background-color: transparent;
+            }
+            QFrame#NotesPanel, QFrame#EditorCard, QFrame#ChatCard {
+                background-color: rgba(255, 255, 255, 0.02);
+                border: 1px solid rgba(255, 255, 255, 0.05);
+                border-radius: 24px;
             }
             QListWidget#NotesList {
                 background-color: rgba(255, 255, 255, 0.04);
@@ -283,12 +327,25 @@ class MainWindow(QMainWindow):
                 background-color: #1f2937;
                 border-radius: 10px;
                 padding: 8px 12px;
+                font-weight: 500;
             }
             QPushButton:hover {
                 background-color: #374151;
             }
             QPushButton:pressed {
                 background-color: #4f46e5;
+            }
+            QPushButton#AiButton {
+                background-color: #4f46e5;
+            }
+            QPushButton#AiButton:hover {
+                background-color: #6366f1;
+            }
+            QPushButton#SendButton {
+                background-color: #2563eb;
+            }
+            QPushButton#SendButton:hover {
+                background-color: #3b82f6;
             }
             QTextEdit#Editor {
                 background-color: rgba(255, 255, 255, 0.04);
@@ -317,18 +374,19 @@ class MainWindow(QMainWindow):
                 font-size: 16px;
                 font-weight: 600;
             }
-            QToolBar {
-                background-color: transparent;
-                spacing: 12px;
-                padding: 8px 0 16px 0;
+            QComboBox#ModelSelector {
+                background-color: rgba(31, 41, 55, 0.8);
+                border-radius: 10px;
+                padding: 6px 12px;
+                border: 1px solid rgba(255, 255, 255, 0.1);
             }
-            QToolBar QToolButton {
-                background-color: #1f2937;
-                border-radius: 12px;
-                padding: 10px 14px;
+            QComboBox#ModelSelector::drop-down {
+                border: none;
             }
-            QToolBar QToolButton:hover {
-                background-color: #4f46e5;
+            QComboBox#ModelSelector QAbstractItemView {
+                background-color: #111827;
+                border-radius: 10px;
+                selection-background-color: #4f46e5;
             }
         """
         )
@@ -497,7 +555,10 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage(str(exc), 5000)
         else:
             if update_status and self.ai_client:
-                self.statusBar().showMessage("ИИ готов к работе", 3000)
+                spec = self.ai_client.model_spec
+                self.statusBar().showMessage(
+                    f"ИИ готов к работе ({spec.label})", 3000
+                )
 
         available = self.ai_client is not None
         if hasattr(self, "ai_button"):
@@ -506,12 +567,55 @@ class MainWindow(QMainWindow):
             self.chat_send_button.setEnabled(available)
         if not available and hasattr(self, "chat_view") and update_status:
             self.chat_view.append("ИИ недоступен. Откройте настройки, чтобы указать ключ API.")
+        self._populate_model_selector()
 
     def _open_settings(self) -> None:
         dialog = SettingsDialog(self, self.settings)
         if dialog.exec() != QDialog.Accepted:
             return
         self.settings = dialog.values()
+        self.settings_store.save(self.settings)
+        self._apply_settings()
+
+    def _populate_model_selector(self) -> None:
+        if not self.model_combo:
+            return
+
+        current_model = self.settings.model or "gemini-2.5-pro"
+        specs = available_model_specs()
+
+        self.model_combo.blockSignals(True)
+        self.model_combo.clear()
+
+        known_ids = []
+        for spec in specs:
+            index = self.model_combo.count()
+            self.model_combo.addItem(spec.label, spec.model_id)
+            self.model_combo.setItemData(index, spec.description, Qt.ToolTipRole)
+            known_ids.append(spec.model_id)
+
+        if current_model not in known_ids:
+            index = self.model_combo.count()
+            self.model_combo.addItem(current_model, current_model)
+            self.model_combo.setItemData(
+                index,
+                "Пользовательская модель из настроек.",
+                Qt.ToolTipRole,
+            )
+
+        index = self.model_combo.findData(current_model)
+        if index < 0:
+            index = 0
+        self.model_combo.setCurrentIndex(index)
+        self.model_combo.blockSignals(False)
+
+    def _handle_model_change(self, index: int) -> None:
+        if not self.model_combo:
+            return
+        model_id = self.model_combo.itemData(index)
+        if not model_id or model_id == self.settings.model:
+            return
+        self.settings.model = model_id
         self.settings_store.save(self.settings)
         self._apply_settings()
 
