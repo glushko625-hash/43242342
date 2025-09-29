@@ -1,0 +1,19 @@
+{
+  "name": "contextual-note-editor",
+  "version": "1.0.0",
+  "description": "Desktop note editor with contextual AI-assisted editing.",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "lint": "eslint renderer --ext .js"
+  },
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "26.2.4",
+    "eslint": "8.54.0"
+  },
+  "dependencies": {
+    "marked": "9.1.6"
+  }
+}
