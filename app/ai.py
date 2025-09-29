@@ -142,16 +142,23 @@ class GeminiClient:
             raise GeminiError("Instruction cannot be empty.")
 
         prompt = (
-            "You are assisting with editing a note. \n"
-            "The full note content is provided between <note> tags. \n"
-            "The text between <selection> tags is currently selected by the user. \n"
-            f"Instruction: {instruction}\n"
-            "Return only the transformed selection with no additional commentary."
-            "\n<note>\n"
+            "Ты редактируешь заметку на русском языке.\n"
+            "Полный контекст заметки находится внутри тегов <note>.\n"
+            "Текущий выделенный фрагмент расположен внутри тегов <selection>.\n"
+            "Инструкция пользователя находится внутри тегов <instruction>.\n"
+            "Пиши по делу, без приветствий и лишних вступлений, можешь дружески обратиться \"братка\".\n"
+            "Если просят составить план или структуру, используй Markdown — подзаголовки и списки по блокам"
+            " вроде Завтрак, Обед, Ужин, Перекусы.\n"
+            "Верни только изменённый вариант выделенного текста без дополнительных комментариев.\n"
+            "<note>\n"
             f"{note_content}\n"
-            "</note>\n<selection>\n"
+            "</note>\n"
+            "<selection>\n"
             f"{selected_text}\n"
-            "</selection>"
+            "</selection>\n"
+            "<instruction>\n"
+            f"{instruction}\n"
+            "</instruction>"
         )
 
         contents = [
@@ -181,11 +188,15 @@ class GeminiClient:
 
         transcript = "\n".join(transcript_lines) if transcript_lines else "(нет истории)"
         prompt = (
-            "Ты помощник, который помогает редактировать и анализировать заметки.\n"
-            "Используй контекст заметки и историю переписки, чтобы отвечать полезно.\n"
+            "Ты дружелюбный помощник по заметкам.\n"
+            "Используй контекст заметки и историю переписки, чтобы отвечать по делу.\n"
             "Контекст заметки расположен внутри тегов <note>.\n"
             "История чата расположена внутри тегов <history>.\n"
-            "Ответь развернуто, при необходимости предложи идеи по улучшению.\n"
+            "Сообщение пользователя расположено внутри тегов <message>.\n"
+            "Отвечай без приветствий, дружеским тоном, можешь обращаться \"братка\".\n"
+            "Если просят план или структуру, распиши по разделам с подзаголовками и списками в Markdown"
+            " (например, Завтрак, Обед, Ужин, Перекусы).\n"
+            "Давай конкретные советы и идеи по улучшению заметки.\n"
             "<note>\n"
             f"{note_content}\n"
             "</note>\n"

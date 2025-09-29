@@ -3,11 +3,12 @@ from __future__ import annotations
 
 import os
 import sys
+from html import escape
 from pathlib import Path
 from typing import Dict, List, Optional
 
 from PySide6.QtCore import Qt, QThread, Signal
-from PySide6.QtGui import QCloseEvent, QIcon, QTextCursor
+from PySide6.QtGui import QCloseEvent, QIcon, QTextCursor, QTextDocument
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -27,6 +28,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QSplitter,
+    QTextBrowser,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -37,6 +39,26 @@ from note_store import Note, NoteStore
 from settings_store import AppSettings, SettingsStore
 
 APP_NAME = "Aurora Notes"
+
+DEFAULT_SELECTION_PROMPT = (
+    "Ты переписываешь выделенный текст в заметке. Учитывай весь контекст заметки и"
+    " дружески обращайся к пользователю, можешь использовать слово \"братка\"."
+    " Пиши по делу без приветствий и лишних вступлений, возвращай только изменённый"
+    " фрагмент. Если нужно структурировать ответ, используй Markdown со списками и"
+    " подзаголовками."
+)
+
+PREVIEW_PLACEHOLDER_HTML = (
+    "<div style=\"opacity:0.45; font-size:13px; text-align:center; padding:32px 0;\">"
+    "Предпросмотр Markdown появится здесь."
+    "</div>"
+)
+
+CHAT_PLACEHOLDER_HTML = (
+    "<div style=\"opacity:0.45; font-size:13px; text-align:center; padding:20px 0;\">"
+    "Спроси ИИ о заметке, чтобы начать диалог."
+    "</div>"
+)
 
 
 class AiWorker(QThread):
@@ -223,10 +245,41 @@ class MainWindow(QMainWindow):
 
         editor_layout.addWidget(editor_header)
 
+        prompt_label = QLabel("Инструкция для выделения")
+        prompt_label.setObjectName("SelectionPromptLabel")
+        editor_layout.addWidget(prompt_label)
+
+        self.selection_prompt_edit = QPlainTextEdit()
+        self.selection_prompt_edit.setObjectName("SelectionPrompt")
+        self.selection_prompt_edit.setPlaceholderText("Опишите, что ИИ должен сделать с выделением…")
+        self.selection_prompt_edit.setPlainText(DEFAULT_SELECTION_PROMPT)
+        self.selection_prompt_edit.setFixedHeight(110)
+        editor_layout.addWidget(self.selection_prompt_edit)
+
+        self.selection_command_edit = QLineEdit()
+        self.selection_command_edit.setObjectName("SelectionCommand")
+        self.selection_command_edit.setPlaceholderText("Опишите конкретную задачу для ИИ…")
+        self.selection_command_edit.returnPressed.connect(self._ask_ai_to_edit)
+        editor_layout.addWidget(self.selection_command_edit)
+
+        editor_splitter = QSplitter(Qt.Vertical)
+        editor_splitter.setChildrenCollapsible(False)
+        editor_splitter.setObjectName("EditorSplitter")
+
         self.editor = QTextEdit()
         self.editor.setObjectName("Editor")
-        self.editor.textChanged.connect(self._persist_active_note)
-        editor_layout.addWidget(self.editor, 1)
+        self.editor.textChanged.connect(self._handle_editor_change)
+        editor_splitter.addWidget(self.editor)
+
+        self.preview = QTextBrowser()
+        self.preview.setObjectName("Preview")
+        self.preview.setOpenExternalLinks(True)
+        self.preview.setHtml(self._preview_base_html(PREVIEW_PLACEHOLDER_HTML))
+        editor_splitter.addWidget(self.preview)
+        editor_splitter.setStretchFactor(0, 3)
+        editor_splitter.setStretchFactor(1, 2)
+
+        editor_layout.addWidget(editor_splitter, 1)
 
         # Right panel: chat and model selector
         chat_card = QFrame()
@@ -252,9 +305,10 @@ class MainWindow(QMainWindow):
 
         chat_layout.addWidget(chat_header_row)
 
-        self.chat_view = QTextEdit()
+        self.chat_view = QTextBrowser()
         self.chat_view.setObjectName("ChatView")
         self.chat_view.setReadOnly(True)
+        self.chat_view.setOpenExternalLinks(True)
         chat_layout.addWidget(self.chat_view, 1)
 
         clear_button = QPushButton("Очистить чат")
@@ -287,6 +341,7 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(1, 2)
         splitter.setStretchFactor(2, 1)
 
+        self._refresh_chat_view()
         self._apply_theme()
 
     def _apply_theme(self) -> None:
@@ -355,11 +410,41 @@ class MainWindow(QMainWindow):
                 font-size: 15px;
                 line-height: 1.5em;
             }
-            QTextEdit#ChatView {
-                background-color: rgba(255, 255, 255, 0.02);
-                border: 1px solid rgba(255, 255, 255, 0.06);
+            QPlainTextEdit#SelectionPrompt {
+                background-color: rgba(255, 255, 255, 0.03);
+                border: 1px solid rgba(255, 255, 255, 0.08);
                 border-radius: 14px;
                 padding: 12px;
+                font-size: 14px;
+                line-height: 1.4em;
+            }
+            QLineEdit#SelectionCommand {
+                background-color: rgba(255, 255, 255, 0.02);
+                border: 1px solid rgba(255, 255, 255, 0.08);
+                border-radius: 12px;
+                padding: 10px 14px;
+                font-size: 14px;
+            }
+            QLabel#SelectionPromptLabel {
+                font-size: 13px;
+                font-weight: 600;
+                letter-spacing: 0.05em;
+                text-transform: uppercase;
+                color: rgba(244, 246, 251, 0.7);
+            }
+            QTextBrowser#Preview {
+                background-color: rgba(17, 24, 39, 0.55);
+                border: 1px solid rgba(99, 102, 241, 0.2);
+                border-radius: 16px;
+                padding: 18px;
+                font-size: 14px;
+                line-height: 1.55em;
+            }
+            QTextBrowser#ChatView {
+                background-color: rgba(255, 255, 255, 0.02);
+                border: 1px solid rgba(255, 255, 255, 0.06);
+                border-radius: 18px;
+                padding: 16px;
                 font-size: 14px;
                 line-height: 1.45em;
             }
@@ -369,6 +454,10 @@ class MainWindow(QMainWindow):
                 border-radius: 12px;
                 padding: 10px;
                 font-size: 14px;
+            }
+            QSplitter#EditorSplitter::handle {
+                background-color: rgba(255, 255, 255, 0.02);
+                margin: 8px 0;
             }
             QLabel#ChatHeader {
                 font-size: 16px;
@@ -399,7 +488,9 @@ class MainWindow(QMainWindow):
             sample = self.store.create_note("Первая заметка")
             sample.content = (
                 "# Добро пожаловать в Aurora Notes\n\n"
-                "Выделите текст, нажмите на кнопку AI и опишите, что нужно сделать."
+                "Напишите идеи, выделите фрагмент и нажмите «Изменить выделение».\n"
+                "Перед запуском ИИ вы можете скорректировать подсказку в поле справа от кнопки.\n\n"
+                "Используйте Markdown для выделения мыслей: **жирный текст**, списки и заголовки."
             )
             self.store.save_note(sample)
             notes = [sample]
@@ -411,6 +502,10 @@ class MainWindow(QMainWindow):
 
         if self.note_list.count():
             self.note_list.setCurrentRow(0)
+
+    def _handle_editor_change(self) -> None:
+        self._update_preview()
+        self._persist_active_note()
 
     def _persist_active_note(self) -> None:
         if not self.active_note:
@@ -424,6 +519,9 @@ class MainWindow(QMainWindow):
             self.editor.clear()
             self.active_note = None
             self._clear_chat(silent=True)
+            self.preview.setHtml(self._preview_base_html(PREVIEW_PLACEHOLDER_HTML))
+            if hasattr(self, "selection_command_edit"):
+                self.selection_command_edit.clear()
             return
         item = items[0]
         note: Note = item.data(Qt.UserRole)
@@ -431,7 +529,9 @@ class MainWindow(QMainWindow):
         self.editor.blockSignals(True)
         self.editor.setPlainText(note.content)
         self.editor.blockSignals(False)
+        self._update_preview()
         self._clear_chat(silent=True)
+        self.selection_command_edit.clear()
 
     def _create_note(self) -> None:
         title, ok = QInputDialog.getText(self, "Новая заметка", "Название:", text="Новая заметка")
@@ -478,9 +578,23 @@ class MainWindow(QMainWindow):
         if not selection:
             QMessageBox.warning(self, "Нет выделения", "Выделите текст для изменения.")
             return
-        instruction, ok = QInputDialog.getText(self, "AI помощник", "Что нужно сделать с выделенным текстом?")
-        if not ok or not instruction.strip():
+        instruction = self.selection_prompt_edit.toPlainText().strip()
+        if not instruction:
+            QMessageBox.warning(
+                self,
+                "Нет инструкции",
+                "Заполните поле \"Инструкция для выделения\" перед запуском ИИ.",
+            )
             return
+        command = self.selection_command_edit.text().strip()
+        if not command:
+            QMessageBox.warning(
+                self,
+                "Нет задачи",
+                "Опишите конкретную задачу для ИИ в поле под подсказкой.",
+            )
+            return
+        combined_instruction = instruction + "\n\nЗадача: " + command
         self.pending_ai_range = (cursor.selectionStart(), cursor.selectionEnd())
         self.statusBar().showMessage("ИИ думает…", 0)
         self.ai_button.setEnabled(False)
@@ -488,7 +602,7 @@ class MainWindow(QMainWindow):
             self.ai_client,
             self.editor.toPlainText(),
             selection,
-            instruction.strip(),
+            combined_instruction,
         )
         self.ai_thread.completed.connect(self._apply_ai_result)
         self.ai_thread.failed.connect(self._ai_failed)
@@ -508,6 +622,7 @@ class MainWindow(QMainWindow):
         cursor.endEditBlock()
         self.statusBar().showMessage("Готово", 3000)
         self._persist_active_note()
+        self._update_preview()
         self.pending_ai_range = None
 
     def _ai_failed(self, error: str) -> None:
@@ -518,6 +633,91 @@ class MainWindow(QMainWindow):
     def _cleanup_ai_thread(self) -> None:
         self.ai_button.setEnabled(self.ai_client is not None)
         self.ai_thread = None
+
+    def _update_preview(self) -> None:
+        if not hasattr(self, "preview"):
+            return
+        text = self.editor.toPlainText()
+        if not text.strip():
+            self.preview.setHtml(self._preview_base_html(PREVIEW_PLACEHOLDER_HTML))
+            return
+        body = self._markdown_to_html_fragment(text)
+        if not body:
+            body = PREVIEW_PLACEHOLDER_HTML
+        self.preview.setHtml(self._preview_base_html(body))
+
+    def _preview_base_html(self, body: str) -> str:
+        return (
+            "<style>"
+            "body {background-color: transparent; color: #f4f6fb; font-family: 'Segoe UI', 'Inter', sans-serif;}"
+            "h1, h2, h3 {color: #f9fafb; margin: 0.8em 0 0.4em;}"
+            "ul, ol {margin-left: 18px;}"
+            "li {margin-bottom: 4px;}"
+            "strong {color: #f9fafb;}"
+            "em {color: rgba(226, 232, 240, 0.9);}" 
+            "code {font-family: 'JetBrains Mono', monospace; background-color: rgba(15, 23, 42, 0.65); padding: 2px 4px; border-radius: 4px;}"
+            "a {color: #60a5fa;}"
+            "</style>"
+            + body
+        )
+
+    def _markdown_to_html_fragment(self, text: str) -> str:
+        doc = QTextDocument()
+        doc.setMarkdown(text)
+        html = doc.toHtml()
+        start = html.find("<body>")
+        end = html.rfind("</body>")
+        if start != -1 and end != -1:
+            html = html[start + len("<body>") : end]
+        return html.strip()
+
+    def _refresh_chat_view(self) -> None:
+        if not hasattr(self, "chat_view"):
+            return
+        base_style = (
+            "<style>"
+            "body {background-color: transparent; color: #f4f6fb; font-family: 'Segoe UI', 'Inter', sans-serif;}"
+            "p {margin: 0 0 0.6em 0;}"
+            "ul, ol {margin-left: 18px;}"
+            "li {margin-bottom: 4px;}"
+            "a {color: #60a5fa;}"
+            "strong {color: #f9fafb;}"
+            "em {color: rgba(226, 232, 240, 0.9);}" 
+            "</style>"
+        )
+        if not self.chat_history:
+            self.chat_view.setHtml(base_style + CHAT_PLACEHOLDER_HTML)
+            if self.chat_view.verticalScrollBar():
+                self.chat_view.verticalScrollBar().setValue(
+                    self.chat_view.verticalScrollBar().maximum()
+                )
+            return
+
+        bubbles: List[str] = []
+        for message in self.chat_history:
+            role = message.get("role", "user")
+            author = "Вы" if role == "user" else "Aurora AI"
+            body_html = self._markdown_to_html_fragment(message.get("content", "")) or "<p>…</p>"
+            align = "flex-end" if role == "user" else "flex-start"
+            background = "#312e81" if role == "user" else "rgba(148, 163, 184, 0.12)"
+            radius = "18px 4px 18px 18px" if role == "user" else "4px 18px 18px 18px"
+            bubbles.append(
+                "<div style=\"display:flex; justify-content:" + align + "; margin-bottom:16px;\">"
+                "<div style=\"max-width:88%; background-color:" + background + "; color:#f9fafb; padding:14px 18px;"
+                " border-radius:" + radius + "; box-shadow:0 12px 28px rgba(15, 23, 42, 0.4);\">"
+                "<div style=\"font-size:11px; letter-spacing:0.08em; text-transform:uppercase; opacity:0.6;"
+                " margin-bottom:6px;\">"
+                + escape(author)
+                + "</div>"
+                "<div style=\"font-size:14px; line-height:1.6;\">" + body_html + "</div>"
+                "</div></div>"
+            )
+
+        self.chat_view.setHtml(base_style + "".join(bubbles))
+        if self.chat_view.verticalScrollBar():
+            self.chat_view.verticalScrollBar().setValue(
+                self.chat_view.verticalScrollBar().maximum()
+            )
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: D401 - Qt signature
         if self.ai_thread and self.ai_thread.isRunning():
@@ -565,8 +765,8 @@ class MainWindow(QMainWindow):
             self.ai_button.setEnabled(available)
         if hasattr(self, "chat_send_button"):
             self.chat_send_button.setEnabled(available)
-        if not available and hasattr(self, "chat_view") and update_status:
-            self.chat_view.append("ИИ недоступен. Откройте настройки, чтобы указать ключ API.")
+        if not available and update_status:
+            self._refresh_chat_view()
         self._populate_model_selector()
 
     def _open_settings(self) -> None:
@@ -621,7 +821,7 @@ class MainWindow(QMainWindow):
 
     def _clear_chat(self, silent: bool = False) -> None:
         self.chat_history.clear()
-        self.chat_view.clear()
+        self._refresh_chat_view()
         if not silent:
             self.statusBar().showMessage("История чата очищена", 3000)
 
@@ -634,7 +834,7 @@ class MainWindow(QMainWindow):
             return
         self.chat_input.clear()
         self.chat_history.append({"role": "user", "content": text})
-        self._append_chat_message("Вы", text)
+        self._refresh_chat_view()
         self.chat_send_button.setEnabled(False)
         self.statusBar().showMessage("ИИ пишет ответ…", 0)
 
@@ -651,7 +851,7 @@ class MainWindow(QMainWindow):
 
     def _chat_reply_ready(self, reply: str) -> None:
         self.chat_history.append({"role": "assistant", "content": reply})
-        self._append_chat_message("Aurora AI", reply)
+        self._refresh_chat_view()
         self.statusBar().showMessage("Ответ получен", 3000)
 
     def _chat_failed(self, error: str) -> None:
@@ -659,16 +859,11 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, "Ошибка ИИ", error)
         if self.chat_history and self.chat_history[-1].get("role") == "user":
             self.chat_history.pop()
+        self._refresh_chat_view()
 
     def _cleanup_chat_thread(self) -> None:
         self.chat_thread = None
         self.chat_send_button.setEnabled(self.ai_client is not None)
-
-    def _append_chat_message(self, author: str, text: str) -> None:
-        if not text:
-            return
-        escaped = text.replace("\n", "<br>")
-        self.chat_view.append(f"<b>{author}:</b><br>{escaped}\n")
 
     # endregion ---------------------------------------------------------
 
