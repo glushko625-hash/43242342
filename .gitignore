@@ -1,3 +1,8 @@
-node_modules/
+__pycache__/
+*.py[cod]
+.venv/
+build/
+dist/
+*.spec
 .DS_Store
-npm-debug.log*
+.aurora_notes/
