@@ -38,10 +38,22 @@ class GeminiClient:
 
     def _run_stream(self, contents: List[types.Content]) -> str:
         tools = [types.Tool(googleSearch=types.GoogleSearch())]
-        config = types.GenerateContentConfig(
-            thinking_config=types.ThinkingConfig(thinking_budget=-1),
-            tools=tools,
-        )
+
+        config_kwargs = {"tools": tools}
+        thinking_config = None
+
+        # google-genai evolves quickly; prefer the unlimited thinking budget when supported.
+        for field in ("thinking_budget", "budget_tokens"):
+            try:
+                thinking_config = types.ThinkingConfig(**{field: -1})
+                break
+            except Exception:  # pragma: no cover - depends on installed SDK version
+                continue
+
+        if thinking_config is not None:
+            config_kwargs["thinking_config"] = thinking_config
+
+        config = types.GenerateContentConfig(**config_kwargs)
 
         try:
             chunks = self._client.models.generate_content_stream(
